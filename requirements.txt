@@ -1,2 +1,2 @@
+# 安装当前项目以及 pyproject.toml 中的 dev 测试依赖。
 -e .[dev]
-

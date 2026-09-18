@@ -1,3 +1,9 @@
+"""幂等的面试演示数据。
+
+数据流：常量商品/订单 → SQLAlchemy → MySQL；知识原文 → RAGService → 分块与向量。
+重复启动先检查表计数和文档内容哈希，不会无限重复写入。
+"""
+
 from __future__ import annotations
 
 from decimal import Decimal
@@ -8,6 +14,7 @@ from app.db.database import Database
 from app.db.models import Order, Product
 from app.rag.service import RAGService
 
+# 结构化商品：由 Product Agent 直接查询，不让 LLM 编造价格和库存。
 PRODUCTS = [
     {
         "name": "智能手表 Pro",
@@ -43,6 +50,7 @@ PRODUCTS = [
     },
 ]
 
+# 结构化订单：订单号作为主键，便于 Order Agent 做精确查询。
 ORDERS = [
     {
         "id": "ORD001",
@@ -73,6 +81,7 @@ ORDERS = [
     },
 ]
 
+# 非结构化知识：启动时走与用户文档相同的 RAG 导入链路。
 KNOWLEDGE_DOCUMENTS = [
     {
         "title": "RAG 检索增强生成原理与实践",
@@ -120,6 +129,9 @@ Redis 用于短生命周期和高频访问数据，包括 RAG 检索结果、问
 
 
 def seed_all(database: Database, rag: RAGService) -> dict[str, int]:
+    """写入结构化业务数据和 RAG 文档，并返回播种统计。"""
+
+    # 数据流 1：种子字典 → ORM Product/Order → MySQL（空表时才写）。
     with database.session_factory() as db:
         if int(db.scalar(select(func.count(Product.id))) or 0) == 0:
             db.add_all(Product(**item) for item in PRODUCTS)
@@ -127,6 +139,7 @@ def seed_all(database: Database, rag: RAGService) -> dict[str, int]:
             db.add_all(Order(**item) for item in ORDERS)
         db.commit()
 
+    # 数据流 2：知识原文 → RAG ingest → hash 去重 → chunks/embeddings → MySQL。
     created_documents = 0
     for item in KNOWLEDGE_DOCUMENTS:
         result = rag.ingest(**item)
@@ -136,4 +149,3 @@ def seed_all(database: Database, rag: RAGService) -> dict[str, int]:
         "orders": len(ORDERS),
         "new_documents": created_documents,
     }
-

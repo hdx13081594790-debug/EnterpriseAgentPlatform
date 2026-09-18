@@ -1,4 +1,5 @@
 [build-system]
+# 源码 → setuptools → 可安装 wheel/editable package。
 requires = ["setuptools>=75,<82"]
 build-backend = "setuptools.build_meta"
 
@@ -9,13 +10,16 @@ description = "RAG + LangGraph multi-agent + MySQL + Redis interview project"
 readme = "README.md"
 requires-python = ">=3.11,<3.14"
 dependencies = [
+    # API 与配置边界
     "fastapi>=0.115,<1",
     "uvicorn[standard]>=0.34,<1",
     "pydantic>=2.10,<3",
     "pydantic-settings>=2.7,<3",
+    # MySQL 事实存储与 Redis 热缓存
     "sqlalchemy>=2.0,<3",
     "pymysql>=1.1,<2",
     "redis>=5.2,<8",
+    # LLM、RAG 分块与 LangGraph 数据流编排
     "langchain>=1.1,<2",
     "langgraph>=1.0,<2",
     "langchain-text-splitters>=0.3,<2",
@@ -23,6 +27,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# OpenAI 仅在显式切换 provider 时需要；开发组提供测试、覆盖率与静态检查。
 openai = ["langchain-openai>=0.3,<2"]
 dev = [
     "httpx>=0.28,<1",

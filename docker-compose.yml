@@ -1,4 +1,5 @@
 services:
+  # HTTP 请求 → api；api 再通过服务名 mysql/redis 访问基础设施。
   api:
     build: .
     ports:
@@ -6,6 +7,7 @@ services:
     env_file:
       - .env
     environment:
+      # 覆盖 .env 的本地 SQLite/内存配置，切换为容器网络地址。
       DATABASE_URL: mysql+pymysql://agent:agent_pass@mysql:3306/agent_platform?charset=utf8mb4
       REDIS_URL: redis://redis:6379/0
     depends_on:
@@ -16,6 +18,7 @@ services:
     restart: unless-stopped
 
   mysql:
+    # 事实数据流：Agent/Repository → MySQL；volume 保证容器重建后数据仍存在。
     image: mysql:8.4
     environment:
       MYSQL_DATABASE: agent_platform
@@ -35,6 +38,7 @@ services:
       retries: 20
 
   redis:
+    # 热数据流：RAG/Session → Redis TTL；不可用时应用自动降级到进程内缓存。
     image: redis:7.4-alpine
     ports:
       - "6379:6379"
@@ -48,6 +52,6 @@ services:
       retries: 20
 
 volumes:
+  # 两个命名卷把容器生命周期与数据生命周期解耦。
   mysql_data:
   redis_data:
-

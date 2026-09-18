@@ -1,2 +1,1 @@
-"""Application configuration and shared utilities."""
-
+"""核心配置包：环境变量 → 强类型 Settings → 各基础设施。"""

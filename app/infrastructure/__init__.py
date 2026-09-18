@@ -1,2 +1,1 @@
-"""Infrastructure adapters."""
-
+"""基础设施适配包：当前包含 Redis 优先的缓存实现。"""

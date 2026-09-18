@@ -1,2 +1,1 @@
-"""Retrieval-augmented generation package."""
-
+"""RAG 包：原文 → 分块/向量；问题 → 召回/上下文/答案。"""

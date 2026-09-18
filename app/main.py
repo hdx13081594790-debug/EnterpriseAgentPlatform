@@ -1,3 +1,9 @@
+"""FastAPI 应用入口与生命周期管理。
+
+启动数据流：配置 → Container → 建表 → 幂等种子数据 → 接收请求。
+关闭数据流：停止接收请求 → Cache/Database 释放连接。
+"""
+
 from __future__ import annotations
 
 import logging
@@ -15,6 +21,9 @@ from app.services.container import ApplicationContainer
 
 
 def create_app(settings: Settings | None = None, *, seed: bool = True) -> FastAPI:
+    """创建可配置的 FastAPI 实例；测试可传入隔离配置并控制是否播种。"""
+
+    # 数据流：显式测试配置优先；否则读取进程级环境配置。
     active_settings = settings or get_settings()
     logging.basicConfig(
         level=getattr(logging, active_settings.log_level.upper(), logging.INFO),
@@ -23,14 +32,19 @@ def create_app(settings: Settings | None = None, *, seed: bool = True) -> FastAP
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        """只在应用启动/关闭各执行一次的资源生命周期。"""
+
+        # 启动方向：Settings → Container → schema → seed → app.state。
         container = ApplicationContainer(active_settings)
         container.database.create_schema()
         if seed:
             seed_all(container.database, container.rag)
+        # 路由通过 request.app.state 取得同一个容器，不使用隐藏的模块全局变量。
         app.state.container = container
         try:
             yield
         finally:
+            # 关闭方向：FastAPI lifespan → Container → Redis/DB 连接池。
             container.close()
 
     application = FastAPI(
@@ -41,6 +55,7 @@ def create_app(settings: Settings | None = None, *, seed: bool = True) -> FastAP
         ),
         lifespan=lifespan,
     )
+    # 浏览器前端跨域白名单；生产环境应由配置提供真实域名。
     application.add_middleware(
         CORSMiddleware,
         allow_origins=["http://localhost:3000", "http://localhost:5173"],
@@ -52,5 +67,5 @@ def create_app(settings: Settings | None = None, *, seed: bool = True) -> FastAP
     return application
 
 
+# Uvicorn 默认导入的 ASGI 对象：``uvicorn app.main:app``。
 app = create_app()
-

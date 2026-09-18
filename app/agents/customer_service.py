@@ -1,3 +1,12 @@
+"""多智能体客服 Supervisor 工作流。
+
+主数据流：用户消息 → 加载会话 → Supervisor 分类 → 专业 Worker → 质量检查 →
+（可选人工复核提示）→ MySQL 会话/Trace + Redis 热会话 → API 响应。
+
+LangGraph 节点只返回“状态增量”，框架把增量合并进 ``CustomerServiceState`` 后传给
+下一节点。这样每个 Agent 不需要知道完整流程，只处理自己负责的字段。
+"""
+
 from __future__ import annotations
 
 import re
@@ -28,26 +37,39 @@ Intent = Literal[
 
 
 class IntentDecision(BaseModel):
+    """Supervisor 的结构化输出，限制路由只能落到已注册 Worker。"""
+
     intent: Intent
     confidence: float = Field(ge=0, le=1)
     reason: str
 
 
 class QualityDecision(BaseModel):
+    """质量 Agent 的结构化输出，用于决定正常结束还是人工复核。"""
+
     score: float = Field(ge=0, le=1)
     needs_human: bool
     reason: str
 
 
 class CustomerServiceState(TypedDict, total=False):
+    """客服图中所有节点共享的状态载体。
+
+    数据沿图的边向前流动；每个节点读取需要的字段并返回少量更新字段。
+    """
+
+    # 请求标识：request_id 聚合 Trace，session_id 聚合多轮消息。
     request_id: str
     session_id: str
     user_message: str
+    # 上下文流：Redis/MySQL → history → 路由与回答 Agent。
     history: list[dict[str, str]]
+    # 路由流：Supervisor → intent/confidence/reason → 条件边。
     intent: Intent
     route_confidence: float
     route_reason: str
     agent_name: str
+    # 回答流：专业 Worker → response/sources → Quality Agent → API。
     response: str
     sources: list[dict[str, Any]]
     quality_score: float
@@ -56,7 +78,7 @@ class CustomerServiceState(TypedDict, total=False):
 
 
 class CustomerServiceWorkflow:
-    """Supervisor graph that routes requests to specialized worker agents."""
+    """把请求路由到专业 Worker，并统一质检、追踪和持久化。"""
 
     def __init__(
         self,
@@ -66,6 +88,8 @@ class CustomerServiceWorkflow:
         research: ResearchWorkflow,
         llm: LLMClient,
     ):
+        """注入共享服务并只编译一次 LangGraph。"""
+
         self.database = database
         self.cache = cache
         self.rag = rag
@@ -74,7 +98,10 @@ class CustomerServiceWorkflow:
         self.graph = self._build_graph()
 
     def _build_graph(self):
+        """声明节点、固定边和条件边，返回可执行图。"""
+
         graph = StateGraph(CustomerServiceState)
+        # 每个业务节点外包一层 _traced，节点执行完成后会写 AgentTrace。
         graph.add_node("load_context", self._traced("load_context", self._load_context))
         graph.add_node("supervisor", self._traced("supervisor", self._classify))
         graph.add_node("rag_agent", self._traced("rag_agent", self._knowledge_agent))
@@ -90,8 +117,10 @@ class CustomerServiceWorkflow:
         )
         graph.add_node("persist", self._traced("persist", self._persist))
 
+        # 固定入口：所有请求都必须先恢复上下文，再让 Supervisor 分类。
         graph.add_edge(START, "load_context")
         graph.add_edge("load_context", "supervisor")
+        # 数据流：state.intent → 条件边 → 且只进入一个专业 Worker。
         graph.add_conditional_edges(
             "supervisor",
             lambda state: state["intent"],
@@ -104,9 +133,11 @@ class CustomerServiceWorkflow:
                 "human": "human_agent",
             },
         )
+        # 除直接人工转接外，所有机器回复都进入同一个质量门。
         for node in ["rag_agent", "tech_agent", "order_agent", "product_agent", "research_agent"]:
             graph.add_edge(node, "quality_agent")
         graph.add_edge("human_agent", "persist")
+        # 数据流：needs_human=False → persist；True → 追加复核提示 → persist。
         graph.add_conditional_edges(
             "quality_agent",
             lambda state: "human" if state.get("needs_human") else "ok",
@@ -117,6 +148,9 @@ class CustomerServiceWorkflow:
         return graph.compile()
 
     def handle(self, *, session_id: str, message: str, request_id: str) -> dict[str, Any]:
+        """构造初始状态、同步执行整张图，并裁剪为 API 所需字段。"""
+
+        # 数据流：HTTP 参数 → 初始 CustomerServiceState → graph.invoke。
         initial: CustomerServiceState = {
             "request_id": request_id,
             "session_id": session_id,
@@ -133,6 +167,7 @@ class CustomerServiceWorkflow:
             "cache_hit": False,
         }
         result = self.graph.invoke(initial)
+        # 图内部状态不全部暴露，API 只接收稳定、可解释的输出字段。
         return {
             "request_id": request_id,
             "session_id": session_id,
@@ -147,6 +182,9 @@ class CustomerServiceWorkflow:
         }
 
     def _load_context(self, state: CustomerServiceState) -> dict[str, Any]:
+        """按 cache-aside 恢复最近会话。"""
+
+        # 数据流：session_id → Redis；miss → MySQL → 回填 Redis → state.history。
         history = self.cache.get_history(state["session_id"])
         if history is None:
             with self.database.session_factory() as db:
@@ -155,6 +193,9 @@ class CustomerServiceWorkflow:
         return {"history": history}
 
     def _classify(self, state: CustomerServiceState) -> dict[str, Any]:
+        """让 Supervisor 产生受 Schema 约束的意图和置信度。"""
+
+        # 规则结果既是 mock 模式的正式结果，也是模型调用失败时的 fallback。
         fallback = self._rule_route(state["user_message"])
         decision = self.llm.structured(
             system=(
@@ -166,6 +207,7 @@ class CustomerServiceWorkflow:
             fallback=fallback,
         )
         if decision.confidence < 0.55:
+            # 低置信度不盲目调用工具，直接沿 human 条件边升级。
             decision = IntentDecision(
                 intent="human", confidence=decision.confidence, reason="路由置信度过低"
             )
@@ -176,6 +218,9 @@ class CustomerServiceWorkflow:
         }
 
     def _knowledge_agent(self, state: CustomerServiceState) -> dict[str, Any]:
+        """把通用知识问题交给 RAG，并透传来源与缓存状态。"""
+
+        # 数据流：message + history → RAGService → answer/sources → state。
         result = self.rag.answer(state["user_message"], state.get("history", []))
         return {
             "agent_name": "rag_agent",
@@ -185,6 +230,9 @@ class CustomerServiceWorkflow:
         }
 
     def _tech_agent(self, state: CustomerServiceState) -> dict[str, Any]:
+        """复用 RAG 证据，并在外层增加可执行的技术排障规范。"""
+
+        # 数据流：技术问题 → FAQ/RAG 证据 → 排障包装 → Quality Agent。
         result = self.rag.answer(state["user_message"], state.get("history", []))
         response = (
             "我是技术支持 Agent。建议先按下面的知识库步骤逐项排查，并在每一步后验证现象：\n\n"
@@ -199,13 +247,18 @@ class CustomerServiceWorkflow:
         }
 
     def _order_agent(self, state: CustomerServiceState) -> dict[str, Any]:
+        """提取订单号并从 MySQL 精确查询，模型不参与订单事实生成。"""
+
+        # 数据流：自然语言 → 正则提取 ORDxxx → CommerceRepository → Order。
         match = re.search(r"\bORD[\-_ ]?\d+\b", state["user_message"], re.IGNORECASE)
         if not match:
+            # 缺少必需参数时不查库，返回明确的补充信息提示。
             return {
                 "agent_name": "order_agent",
                 "response": "请提供订单号（例如 ORD001），我会从 MySQL 查询订单和物流状态。",
             }
         order_id = match.group(0).replace("-", "").replace("_", "").replace(" ", "").upper()
+        # 短 Session 只包围数据库读取，格式化回复不占用数据库连接。
         with self.database.session_factory() as db:
             order = CommerceRepository(db).get_order(order_id)
             if order is None:
@@ -227,7 +280,10 @@ class CustomerServiceWorkflow:
         return {"agent_name": "order_agent", "response": response}
 
     def _product_agent(self, state: CustomerServiceState) -> dict[str, Any]:
+        """从用户文本提取预算/品类，再查询结构化商品表。"""
+
         message = state["user_message"]
+        # 数据流：自然语言 → 预算 Decimal + 受控关键词 → SQL filters。
         budget_match = re.search(r"(?:预算|不超过|以内|低于)?\s*(\d{2,6})\s*(?:元|块)?", message)
         budget = Decimal(budget_match.group(1)) if budget_match else None
         keywords = ["智能手表", "无线耳机", "充电宝", "智能音箱", "手表", "耳机", "音箱"]
@@ -251,6 +307,9 @@ class CustomerServiceWorkflow:
         return {"agent_name": "product_agent", "response": response}
 
     def _research_agent(self, state: CustomerServiceState) -> dict[str, Any]:
+        """把长研究请求委派给独立的研究子图。"""
+
+        # 数据流：message/topic → ResearchWorkflow → Markdown report/sources → 客服 state。
         result = self.research.run(topic=state["user_message"], session_id=state["session_id"])
         return {
             "agent_name": "research_agent",
@@ -260,6 +319,8 @@ class CustomerServiceWorkflow:
 
     @staticmethod
     def _human_agent(state: CustomerServiceState) -> dict[str, Any]:
+        """生成安全的人工转接结果；真实系统可在这里创建工单。"""
+
         return {
             "agent_name": "human_handoff_agent",
             "response": (
@@ -271,7 +332,10 @@ class CustomerServiceWorkflow:
         }
 
     def _quality_agent(self, state: CustomerServiceState) -> dict[str, Any]:
+        """独立评估候选回复，避免生成 Agent 自己给自己放行。"""
+
         response = state.get("response", "")
+        # 规则分数提供确定性基线；失败关键词会触发人工复核。
         heuristic_score = min(0.95, 0.55 + min(len(response), 400) / 1000)
         needs_human = not response or "没有查到" in response or "无法" in response
         fallback = QualityDecision(
@@ -279,6 +343,7 @@ class CustomerServiceWorkflow:
             needs_human=needs_human,
             reason="规则质检：检查空回复、失败信号、完整度和可执行性",
         )
+        # 数据流：问题 + 候选回复 → 质量 Schema → score/needs_human。
         review = self.llm.structured(
             system="你是客服质检 Agent。评估相关性、准确性、完整性和风险；不确定时建议人工。",
             user=f"用户：{state['user_message']}\nAgent：{response}",
@@ -289,6 +354,8 @@ class CustomerServiceWorkflow:
 
     @staticmethod
     def _human_review_notice(state: CustomerServiceState) -> dict[str, Any]:
+        """保留原回复并追加复核提示，而不是静默丢弃已有结果。"""
+
         return {
             "response": (
                 f"{state.get('response', '')}\n\n---\n"
@@ -298,6 +365,8 @@ class CustomerServiceWorkflow:
         }
 
     def _persist(self, state: CustomerServiceState) -> dict[str, Any]:
+        """先持久化完整会话，再刷新 Redis 热历史。"""
+
         metadata = {
             "request_id": state["request_id"],
             "intent": state["intent"],
@@ -305,6 +374,7 @@ class CustomerServiceWorkflow:
             "quality_score": state.get("quality_score", 0),
             "needs_human": state.get("needs_human", False),
         }
+        # 写数据流：最终 state → 两条 ChatMessage → MySQL commit。
         with self.database.session_factory() as db:
             repository = ConversationRepository(db)
             repository.add(state["session_id"], "user", state["user_message"])
@@ -315,6 +385,7 @@ class CustomerServiceWorkflow:
                 agent_name=state["agent_name"],
                 metadata=metadata,
             )
+        # 缓存数据流：旧历史 + 本轮问答 → 最近 20 条 → Redis/session TTL。
         history = [
             *state.get("history", []),
             {"role": "user", "content": state["user_message"]},
@@ -325,7 +396,10 @@ class CustomerServiceWorkflow:
 
     @staticmethod
     def _rule_route(message: str) -> IntentDecision:
+        """按从高风险到通用问题的优先级执行确定性路由。"""
+
         lowered = message.lower()
+        # 投诉/人工优先，避免同时出现商品词时被误路由到销售 Agent。
         rules: list[tuple[Intent, list[str], str]] = [
             ("human", ["人工", "投诉", "经理", "差评", "维权"], "人工服务或投诉关键词"),
             ("research", ["研究报告", "调研", "深入研究", "研究一下"], "研究型长任务"),
@@ -351,8 +425,13 @@ class CustomerServiceWorkflow:
         node_name: str,
         function: Callable[[CustomerServiceState], dict[str, Any]],
     ) -> Callable[[CustomerServiceState], dict[str, Any]]:
+        """给节点增加耗时与摘要追踪，而不污染各节点业务代码。"""
+
         @wraps(function)
         def wrapper(state: CustomerServiceState) -> dict[str, Any]:
+            """执行原节点，并在旁路中记录可观测信息。"""
+
+            # 数据流：node input state → business function → output delta → AgentTrace。
             started = time.perf_counter()
             output = function(state)
             latency_ms = int((time.perf_counter() - started) * 1000)
@@ -366,7 +445,7 @@ class CustomerServiceWorkflow:
                         latency_ms=latency_ms,
                     )
             except Exception:
-                # Observability must not make the business request fail.
+                # 可观测性是旁路能力：追踪失败不能让已经成功的业务请求失败。
                 pass
             return output
 

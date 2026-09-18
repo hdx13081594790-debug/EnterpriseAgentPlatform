@@ -1,3 +1,9 @@
+"""数据库表的 ORM 映射。
+
+总体数据流：API/Agent → Repository → 这些 ORM 实体 → MySQL；读取方向相反。
+JSON 字段用于保存元数据、特征、来源和演示向量，避免把灵活结构拆成过多表。
+"""
+
 from __future__ import annotations
 
 import uuid
@@ -10,18 +16,26 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
 def utc_now() -> datetime:
+    """统一生成带时区的 UTC 时间，避免多服务器时区不一致。"""
+
     return datetime.now(UTC)
 
 
 def new_id() -> str:
+    """生成跨数据库兼容的 UUID 字符串主键。"""
+
     return str(uuid.uuid4())
 
 
 class Base(DeclarativeBase):
+    """所有 ORM 模型共享的 SQLAlchemy 声明式基类。"""
+
     pass
 
 
 class KnowledgeDocument(Base):
+    """RAG 原始文档；``content_hash`` 保证同内容幂等导入。"""
+
     __tablename__ = "knowledge_documents"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
@@ -34,12 +48,15 @@ class KnowledgeDocument(Base):
         DateTime(timezone=True), default=utc_now, nullable=False
     )
 
+    # 数据流：一篇原文 → 多个 KnowledgeChunk；删除原文时级联清理分块。
     chunks: Mapped[list[KnowledgeChunk]] = relationship(
         back_populates="document", cascade="all, delete-orphan"
     )
 
 
 class KnowledgeChunk(Base):
+    """RAG 文本块、演示向量及其在原文中的顺序。"""
+
     __tablename__ = "knowledge_chunks"
     __table_args__ = (Index("ix_knowledge_chunks_document_index", "document_id", "chunk_index"),)
 
@@ -56,6 +73,8 @@ class KnowledgeChunk(Base):
 
 
 class Product(Base):
+    """商品事实数据，由 Product Agent 按关键词和预算查询。"""
+
     __tablename__ = "products"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
@@ -68,6 +87,8 @@ class Product(Base):
 
 
 class Order(Base):
+    """订单与物流事实数据，由 Order Agent 根据订单号精确查询。"""
+
     __tablename__ = "orders"
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True)
@@ -83,6 +104,8 @@ class Order(Base):
 
 
 class ChatMessage(Base):
+    """完整会话记录；Redis 仅缓存其中最近的热数据。"""
+
     __tablename__ = "chat_messages"
     __table_args__ = (Index("ix_chat_session_created", "session_id", "created_at"),)
 
@@ -98,6 +121,8 @@ class ChatMessage(Base):
 
 
 class ResearchTask(Base):
+    """研究工作流的任务状态、报告、来源与质量分。"""
+
     __tablename__ = "research_tasks"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
@@ -116,6 +141,8 @@ class ResearchTask(Base):
 
 
 class AgentTrace(Base):
+    """客服图每个节点的轻量执行轨迹，用于定位路由与延迟问题。"""
+
     __tablename__ = "agent_traces"
     __table_args__ = (Index("ix_trace_request_created", "request_id", "created_at"),)
 
@@ -128,4 +155,3 @@ class AgentTrace(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now, nullable=False
     )
-
