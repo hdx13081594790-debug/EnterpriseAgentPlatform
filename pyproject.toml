@@ -1,0 +1,49 @@
+[build-system]
+requires = ["setuptools>=75,<82"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "interview-agent-platform"
+version = "1.0.0"
+description = "RAG + LangGraph multi-agent + MySQL + Redis interview project"
+readme = "README.md"
+requires-python = ">=3.11,<3.14"
+dependencies = [
+    "fastapi>=0.115,<1",
+    "uvicorn[standard]>=0.34,<1",
+    "pydantic>=2.10,<3",
+    "pydantic-settings>=2.7,<3",
+    "sqlalchemy>=2.0,<3",
+    "pymysql>=1.1,<2",
+    "redis>=5.2,<8",
+    "langchain>=1.1,<2",
+    "langgraph>=1.0,<2",
+    "langchain-text-splitters>=0.3,<2",
+    "langchain-groq>=0.3,<2",
+]
+
+[project.optional-dependencies]
+openai = ["langchain-openai>=0.3,<2"]
+dev = [
+    "httpx>=0.28,<1",
+    "pytest>=8.3,<10",
+    "pytest-cov>=6,<8",
+    "ruff>=0.11,<1",
+]
+
+[tool.setuptools.packages.find]
+include = ["app*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q --disable-warnings"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
+
+[tool.ruff.lint.per-file-ignores]
+"app/db/seed.py" = ["E501"]
