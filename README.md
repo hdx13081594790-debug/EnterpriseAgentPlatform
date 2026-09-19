@@ -1,10 +1,10 @@
-# Interview Agent Platform
+# Enterprise Agent Platform
 
-一个适合面试演示的后端项目：把原来的 RAG 问答、智能客服多 Agent、研究助手三个单文件示例，重构为一个可运行、可测试、可扩展的工程。
+一个面向企业知识服务与智能客服场景的 AI Agent 后端平台。项目将 RAG 问答、多 Agent 客服和研究助手整合为统一的 API 服务，并提供持久化、缓存、可观测性、测试和容器化部署能力。
 
 核心技术栈：FastAPI、LangChain、LangGraph、SQLAlchemy 2、MySQL 8、Redis、Pydantic 2、Pytest。
 
-> 默认使用 `mock + SQLite + 内存缓存`，没有模型密钥、MySQL、Redis 也能演示完整流程。切换环境变量后，同一套代码可使用 Groq/OpenAI、MySQL 和 Redis。
+> 默认使用 `mock + SQLite + 内存缓存`，便于在没有模型密钥和外部服务的环境中完成本地开发。切换环境变量后，同一套代码可使用 Groq/OpenAI、MySQL 和 Redis。
 
 ## 项目亮点
 
@@ -15,9 +15,7 @@
 - Redis：缓存 RAG 召回、最终回答和最近会话；Redis 故障时自动降级，不影响主流程。
 - 工程化：配置校验、依赖注入、分层结构、健康检查、Docker Compose、幂等导入、测试与覆盖率。
 - 可观测性：每个客服图节点的耗时、输入摘要和输出摘要写入 `agent_traces`。
-- 离线可演示：本地哈希向量和确定性规则保证面试现场不依赖外网。
-
-更详细的设计取舍、讲解话术和面试题见 [面试讲解手册](docs/INTERVIEW_GUIDE.md)。
+- 离线可运行：本地哈希向量和确定性规则使核心流程不依赖外网。
 
 ## 系统架构
 
@@ -65,7 +63,7 @@ flowchart LR
 │   │   ├── database.py           # Engine 与 Session 工厂
 │   │   ├── models.py             # 7 张业务表
 │   │   ├── repositories.py       # 数据访问层
-│   │   └── seed.py               # 面试演示数据
+│   │   └── seed.py               # 本地开发初始化数据
 │   ├── infrastructure/cache.py   # Redis + 内存降级
 │   ├── rag/
 │   │   ├── embeddings.py         # 本地/OpenAI Embedding 适配
@@ -121,7 +119,7 @@ Compose 会启动：
 - MySQL 8.4：`127.0.0.1:3306`
 - Redis 7.4：`127.0.0.1:6379`
 
-容器中的 API 会覆盖 `.env` 里的本地 SQLite 配置，自动连接 `mysql` 与 `redis` 服务。应用启动时自动建表，并以幂等方式写入面试演示数据。
+容器中的 API 会覆盖 `.env` 里的本地 SQLite 配置，自动连接 `mysql` 与 `redis` 服务。应用启动时自动建表，并以幂等方式写入本地开发数据。
 
 如果本机已单独安装 MySQL/Redis，可在 `.env` 中设置：
 
@@ -152,7 +150,7 @@ EMBEDDING_MODEL=text-embedding-3-small
 
 真实模型调用失败时，LLM 适配层会记录异常并使用安全 fallback；不会让整个 API 因一次模型错误而退出。
 
-## API 演示
+## API 使用示例
 
 ### 1. 知识库问答
 
@@ -257,13 +255,12 @@ python -m ruff check app tests scripts
 
 ## 已知边界与生产化方向
 
-本项目故意保持为一个可讲清楚的面试项目，而不是假装已经解决所有生产问题：
+当前版本侧重核心链路完整性和模块边界清晰度，仍有以下工程化扩展空间：
 
-- 当前向量保存在 MySQL JSON 字段并由应用层计算余弦相似度，适合中小型演示；大规模场景应接入专用向量数据库或搜索引擎。
+- 当前向量保存在 MySQL JSON 字段并由应用层计算余弦相似度，适合中小型数据集；大规模场景应接入专用向量数据库或搜索引擎。
 - 研究接口目前同步执行；长任务应改为消息队列 + Worker，并增加进度查询或 SSE。
-- 自动建表便于演示；正式环境应使用 Alembic 管理迁移。
+- 当前自动建表简化了本地开发流程；正式环境应使用 Alembic 管理迁移。
 - 生产环境还要增加认证授权、租户隔离、限流、敏感信息脱敏、提示注入检测和完整监控告警。
 - 对退款、发货、删除等有副作用工具，应加入幂等键、权限校验和 human-in-the-loop 确认。
 
-这些边界不是缺陷隐瞒，而是面试中可以主动说明的架构演进路线。
-
+后续可根据数据规模、延迟目标、安全等级和部署环境逐步实施以上改造。
